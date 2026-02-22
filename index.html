@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TRAMA — Instalação Interativa</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #070709; cursor: none; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      display: flex; flex-direction: column; justify-content: center; align-items: center;
+      pointer-events: none; z-index: 10;
+      font-family: 'Roboto Mono', monospace; transition: opacity 2s;
+    }
+    #title {
+      font-size: 10vw; font-weight: 700; color: #e2ded8;
+      letter-spacing: -0.03em; opacity: 0; animation: fadeIn 2s ease-out 1s forwards;
+    }
+    #subtitle {
+      font-size: 2vw; color: #8a8a8a; letter-spacing: 0.15em;
+      text-transform: uppercase; margin-top: 8px;
+      opacity: 0; animation: fadeIn 2s ease-out 2s forwards;
+    }
+    #status {
+      position: fixed; bottom: 20px; left: 20px; color: #333;
+      font-family: monospace; font-size: 12px; z-index: 20;
+    }
+    @keyframes fadeIn { to { opacity: 1; } }
+    @keyframes fadeOut { to { opacity: 0; } }
+    .fade-out { animation: fadeOut 3s ease-out forwards !important; }
+    @import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap');
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div id="overlay">
+    <div id="title">trama</div>
+    <div id="subtitle">jornadas de design · IADE</div>
+  </div>
+  <div id="status"></div>
+  <video id="video" autoplay playsinline style="display:none"></video>
+  <canvas id="cam1" style="display:none"></canvas>
+  <canvas id="cam2" style="display:none"></canvas>
+
+  <script>
+    // ═══════════════════════════════════════════
+    // TRAMA — Instalação Interativa
+    // Webcam + Canvas fullscreen para Raspberry Pi
+    // ═══════════════════════════════════════════
+
+    // === Design Tokens ===
+    const THREADS = ["#ff3c00", "#00e5ff", "#c8ff00", "#ff00aa", "#ff8800", "#7b61ff"];
+    const BG = "#070709";
+    const GLOW = "255,255,255";
+
+    // === Config ===
+    const CONFIG = {
+      seed: 42,
+      interactionRadius: 180,
+      motionThreshold: 30,
+      motionMinArea: 400,
+      maxPoints: 5,
+      smoothing: 0.3,
+      threadStep: 3,
+      mirror: true,
+    };
+
+    // === RNG ===
+    const rng = (s, i) => {
+      let x = Math.sin(s * 9301 + i * 4973) * 49297;
+      return x - Math.floor(x);
+    };
+
+    // === Canvas setup ===
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    let W, H;
+
+    function resize() {
+      W = window.innerWidth;
+      H = window.innerHeight;
+      canvas.width = W;
+      canvas.height = H;
+    }
+    resize();
+    window.addEventListener("resize", resize);
+
+    // === Gerar fios ===
+    const seed = CONFIG.seed;
+    let hThreads = [], vThreads = [];
+
+    function generateThreads() {
+      const hCount = 8 + Math.floor(rng(seed, 0) * 10);
+      const vCount = 8 + Math.floor(rng(seed, 100) * 10);
+      hThreads = [];
+      vThreads = [];
+
+      for (let i = 0; i < hCount; i++) {
+        hThreads.push({
+          baseY: (H * (i + 0.5)) / hCount,
+          thickness: 0.6 + rng(seed, i + 200) * 2.2,
+          color: THREADS[Math.floor(rng(seed, i + 300) * THREADS.length)],
+          speed: 0.1 + rng(seed, i + 400) * 0.5,
+          phase: rng(seed, i + 500) * Math.PI * 2,
+          amplitude: 3 + rng(seed, i + 600) * 16,
+          opacity: 0.2 + rng(seed, i + 700) * 0.55,
+        });
+      }
+      for (let i = 0; i < vCount; i++) {
+        vThreads.push({
+          baseX: (W * (i + 0.5)) / vCount,
+          thickness: 0.6 + rng(seed, i + 800) * 2.2,
+          color: THREADS[Math.floor(rng(seed, i + 900) * THREADS.length)],
+          speed: 0.1 + rng(seed, i + 1000) * 0.5,
+          phase: rng(seed, i + 1100) * Math.PI * 2,
+          amplitude: 3 + rng(seed, i + 1200) * 16,
+          opacity: 0.2 + rng(seed, i + 1300) * 0.55,
+        });
+      }
+    }
+    generateThreads();
+    window.addEventListener("resize", generateThreads);
+
+    // === Pontos de interação ===
+    let interactionPoints = [];
+    let smoothPoints = [];
+
+    // === Deteção de movimento via webcam ===
+    const video = document.getElementById("video");
+    const cam1 = document.getElementById("cam1");
+    const cam2 = document.getElementById("cam2");
+    let camCtx1, camCtx2;
+    let camReady = false;
+    let prevFrame = null;
+    const statusEl = document.getElementById("status");
+
+    async function startCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 320, height: 240, facingMode: "user" }
+        });
+        video.srcObject = stream;
+        await video.play();
+
+        cam1.width = 320; cam1.height = 240;
+        cam2.width = 320; cam2.height = 240;
+        camCtx1 = cam1.getContext("2d", { willReadFrequently: true });
+        camCtx2 = cam2.getContext("2d", { willReadFrequently: true });
+        camReady = true;
+        statusEl.textContent = "webcam OK";
+        setTimeout(() => { statusEl.textContent = ""; }, 3000);
+      } catch (e) {
+        console.warn("Webcam não disponível:", e);
+        statusEl.textContent = "sem webcam — usa o rato";
+        setTimeout(() => { statusEl.textContent = ""; }, 5000);
+      }
+    }
+    startCamera();
+
+    function detectMotion() {
+      if (!camReady) return [];
+
+      // Capturar frame
+      if (CONFIG.mirror) {
+        camCtx1.save();
+        camCtx1.scale(-1, 1);
+        camCtx1.drawImage(video, -320, 0, 320, 240);
+        camCtx1.restore();
+      } else {
+        camCtx1.drawImage(video, 0, 0, 320, 240);
+      }
+
+      const frame = camCtx1.getImageData(0, 0, 320, 240);
+
+      if (!prevFrame) {
+        prevFrame = frame;
+        return [];
+      }
+
+      // Diferença entre frames
+      const diff = camCtx2.createImageData(320, 240);
+      const d = diff.data;
+      const curr = frame.data;
+      const prev = prevFrame.data;
+
+      for (let i = 0; i < curr.length; i += 4) {
+        const r = Math.abs(curr[i] - prev[i]);
+        const g = Math.abs(curr[i+1] - prev[i+1]);
+        const b = Math.abs(curr[i+2] - prev[i+2]);
+        const avg = (r + g + b) / 3;
+        const val = avg > CONFIG.motionThreshold ? 255 : 0;
+        d[i] = d[i+1] = d[i+2] = val;
+        d[i+3] = 255;
+      }
+
+      prevFrame = frame;
+      camCtx2.putImageData(diff, 0, 0);
+
+      // Encontrar regiões de movimento (grid simplificado)
+      const gridW = 16, gridH = 12;
+      const cellW = 320 / gridW, cellH = 240 / gridH;
+      const cells = [];
+
+      for (let gy = 0; gy < gridH; gy++) {
+        for (let gx = 0; gx < gridW; gx++) {
+          let count = 0;
+          const sx = Math.floor(gx * cellW);
+          const sy = Math.floor(gy * cellH);
+          const ex = Math.floor((gx + 1) * cellW);
+          const ey = Math.floor((gy + 1) * cellH);
+
+          for (let y = sy; y < ey; y += 2) {
+            for (let x = sx; x < ex; x += 2) {
+              const idx = (y * 320 + x) * 4;
+              if (d[idx] > 128) count++;
+            }
+          }
+
+          if (count > CONFIG.motionMinArea / 20) {
+            cells.push({
+              x: (gx + 0.5) * cellW,
+              y: (gy + 0.5) * cellH,
+              weight: count
+            });
+          }
+        }
+      }
+
+      // Agrupar células próximas (clustering simples)
+      cells.sort((a, b) => b.weight - a.weight);
+      const points = [];
+      const used = new Set();
+
+      for (let i = 0; i < cells.length && points.length < CONFIG.maxPoints; i++) {
+        if (used.has(i)) continue;
+        let cx = cells[i].x * cells[i].weight;
+        let cy = cells[i].y * cells[i].weight;
+        let totalWeight = cells[i].weight;
+        used.add(i);
+
+        for (let j = i + 1; j < cells.length; j++) {
+          if (used.has(j)) continue;
+          const dx = cells[i].x - cells[j].x;
+          const dy = cells[i].y - cells[j].y;
+          if (Math.sqrt(dx*dx + dy*dy) < cellW * 3) {
+            cx += cells[j].x * cells[j].weight;
+            cy += cells[j].y * cells[j].weight;
+            totalWeight += cells[j].weight;
+            used.add(j);
+          }
+        }
+
+        // Mapear para coordenadas do display
+        points.push({
+          x: (cx / totalWeight) * W / 320,
+          y: (cy / totalWeight) * H / 240
+        });
+      }
+
+      return points;
+    }
+
+    function smoothMotionPoints(raw) {
+      if (raw.length === 0) {
+        // Fade out gradual
+        smoothPoints = smoothPoints.map(p => ({
+          x: p.x + (W/2 - p.x) * 0.02,
+          y: p.y + (H/2 - p.y) * 0.02,
+        })).filter(p => Math.abs(p.x - W/2) > 10 || Math.abs(p.y - H/2) > 10);
+        return;
+      }
+
+      const newSmooth = [];
+      for (let i = 0; i < raw.length; i++) {
+        if (i < smoothPoints.length) {
+          newSmooth.push({
+            x: smoothPoints[i].x + (raw[i].x - smoothPoints[i].x) * CONFIG.smoothing,
+            y: smoothPoints[i].y + (raw[i].y - smoothPoints[i].y) * CONFIG.smoothing,
+          });
+        } else {
+          newSmooth.push(raw[i]);
+        }
+      }
+      smoothPoints = newSmooth;
+    }
+
+    // === Fallback: interação com rato ===
+    let mousePos = null;
+    document.addEventListener("mousemove", (e) => {
+      mousePos = { x: e.clientX, y: e.clientY };
+    });
+    document.addEventListener("touchmove", (e) => {
+      const t = e.touches[0];
+      if (t) mousePos = { x: t.clientX, y: t.clientY };
+    }, { passive: true });
+
+    // === Cálculo de interação ===
+    function calcInteraction(px, py) {
+      let maxI = 0, bestDx = 0, bestDy = 0;
+      for (const p of interactionPoints) {
+        const d = Math.sqrt((px - p.x) ** 2 + (py - p.y) ** 2);
+        const mi = Math.max(0, 1 - d / CONFIG.interactionRadius);
+        if (mi > maxI) { maxI = mi; bestDx = px - p.x; bestDy = py - p.y; }
+      }
+      return { mi: maxI, dx: bestDx, dy: bestDy };
+    }
+
+    // === Animação ===
+    let time = 0;
+    let frameCount = 0;
+    let lastFpsTime = performance.now();
+    let fps = 0;
+
+    function draw() {
+      time += 0.018;
+
+      // Atualizar pontos de interação
+      if (camReady) {
+        if (frameCount % 2 === 0) {  // Processar webcam a cada 2 frames
+          const raw = detectMotion();
+          smoothMotionPoints(raw);
+        }
+        interactionPoints = smoothPoints;
+      } else if (mousePos) {
+        interactionPoints = [mousePos];
+      } else {
+        interactionPoints = [];
+      }
+
+      const hasInteraction = interactionPoints.length > 0;
+      const step = CONFIG.threadStep;
+
+      // Fundo
+      ctx.fillStyle = BG;
+      ctx.fillRect(0, 0, W, H);
+
+      // Fios verticais
+      for (const th of vThreads) {
+        ctx.beginPath();
+        ctx.strokeStyle = th.color;
+        ctx.globalAlpha = th.opacity;
+        ctx.lineWidth = th.thickness;
+        for (let y = 0; y < H; y += step) {
+          const { mi, dx } = hasInteraction ? calcInteraction(th.baseX, y) : { mi: 0, dx: 0 };
+          const w = Math.sin(y * 0.007 + time * th.speed + th.phase) * th.amplitude;
+          const md = mi * 35 * Math.sign(dx);
+          const x = th.baseX + w * (1 + mi * 2.5) + md;
+          y === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+
+      // Fios horizontais
+      for (const th of hThreads) {
+        ctx.beginPath();
+        ctx.strokeStyle = th.color;
+        ctx.globalAlpha = th.opacity;
+        ctx.lineWidth = th.thickness;
+        for (let x = 0; x < W; x += step) {
+          const { mi, dy } = hasInteraction ? calcInteraction(x, th.baseY) : { mi: 0, dy: 0 };
+          const w = Math.sin(x * 0.007 + time * th.speed + th.phase) * th.amplitude;
+          const md = mi * 35 * Math.sign(dy);
+          const y = th.baseY + w * (1 + mi * 2.5) + md;
+          x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+
+      // Brilhos
+      ctx.globalAlpha = 1;
+      if (hasInteraction) {
+        for (const h of hThreads) {
+          for (const v of vThreads) {
+            const { mi } = calcInteraction(v.baseX, h.baseY);
+            if (mi > 0.08) {
+              const r = 2 + mi * 5;
+              const grad = ctx.createRadialGradient(v.baseX, h.baseY, 0, v.baseX, h.baseY, r);
+              grad.addColorStop(0, `rgba(${GLOW},${mi * 0.6})`);
+              grad.addColorStop(1, `rgba(${GLOW},0)`);
+              ctx.fillStyle = grad;
+              ctx.beginPath();
+              ctx.arc(v.baseX, h.baseY, r, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+        }
+      } else {
+        // Brilhos subtis estáticos
+        for (const h of hThreads) {
+          for (const v of vThreads) {
+            if (rng(Math.floor(v.baseX) * 100 + Math.floor(h.baseY), seed) < 0.012) {
+              const g = 0.08 + rng(v.baseX + h.baseY, seed + 1) * 0.1;
+              const r = 2 + g * 5;
+              const grad = ctx.createRadialGradient(v.baseX, h.baseY, 0, v.baseX, h.baseY, r);
+              grad.addColorStop(0, `rgba(${GLOW},${g * 0.6})`);
+              grad.addColorStop(1, `rgba(${GLOW},0)`);
+              ctx.fillStyle = grad;
+              ctx.beginPath();
+              ctx.arc(v.baseX, h.baseY, r, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+        }
+      }
+
+      ctx.globalAlpha = 1;
+
+      // FPS counter
+      frameCount++;
+      const now = performance.now();
+      if (now - lastFpsTime > 1000) {
+        fps = frameCount;
+        frameCount = 0;
+        lastFpsTime = now;
+      }
+
+      requestAnimationFrame(draw);
+    }
+
+    // Fade out do título após 8 segundos
+    setTimeout(() => {
+      document.getElementById("overlay").classList.add("fade-out");
+    }, 8000);
+
+    // Iniciar
+    draw();
+  </script>
+</body>
+</html>
