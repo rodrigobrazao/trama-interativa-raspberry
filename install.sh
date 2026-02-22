@@ -2,6 +2,7 @@
 # ═══════════════════════════════════════════
 # TRAMA — Instalação para Raspberry Pi
 # Versão browser (Chromium kiosk mode)
+# Compatível com Pi OS Lite (sem desktop)
 # ═══════════════════════════════════════════
 
 echo "═══════════════════════════════════════════"
@@ -10,36 +11,44 @@ echo "════════════════════════�
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Instalar Chromium se necessário
-echo "[1/4] A verificar Chromium..."
+# [1/6] Instalar X server mínimo + Chromium
+echo "[1/6] A instalar pacotes (X server, Chromium, etc.)..."
 sudo apt-get update -y
-sudo apt-get install -y chromium-browser unclutter
+sudo apt-get install -y \
+  xserver-xorg x11-xserver-utils xinit openbox \
+  chromium-browser unclutter v4l-utils
 
-# Desativar screensaver
-echo "[2/4] A desativar screensaver..."
-sudo apt-get install -y xdotool xscreensaver 2>/dev/null || true
-# Desabilitar blank screen
+# [2/6] Desativar screensaver / blank screen
+echo "[2/6] A desativar screensaver..."
 sudo raspi-config nonint do_blanking 1 2>/dev/null || true
 
-# Criar script de arranque
-echo "[3/4] A criar script de arranque..."
-cat > "$SCRIPT_DIR/start.sh" << STARTEOF
-#!/bin/bash
-# TRAMA — Arranque automático
-sleep 5
+# [3/6] Aumentar GPU memory
+echo "[3/6] A configurar GPU memory..."
+CONFIG_FILE="/boot/firmware/config.txt"
+[ ! -f "$CONFIG_FILE" ] && CONFIG_FILE="/boot/config.txt"
+if ! grep -q 'gpu_mem=128' "$CONFIG_FILE" 2>/dev/null; then
+  echo 'gpu_mem=128' | sudo tee -a "$CONFIG_FILE"
+fi
 
-# Desativar screensaver e cursor
-export DISPLAY=:0
-xset s off 2>/dev/null || true
-xset -dpms 2>/dev/null || true
-xset s noblank 2>/dev/null || true
+# [4/6] Configurar auto-login no tty1
+echo "[4/6] A configurar auto-login..."
+sudo mkdir -p /etc/systemd/system/getty@tty1.service.d
+sudo tee /etc/systemd/system/getty@tty1.service.d/autologin.conf > /dev/null << 'LOGINEOF'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin pi --noclear %I $TERM
+LOGINEOF
+
+# [5/6] Configurar openbox autostart (lança Chromium kiosk)
+echo "[5/6] A configurar openbox + Chromium kiosk..."
+mkdir -p /home/pi/.config/openbox
+cat > /home/pi/.config/openbox/autostart << OBEOF
+# TRAMA — Openbox Autostart
+xset s off &
+xset -dpms &
+xset s noblank &
 unclutter -idle 0.5 -root &
 
-# Fechar Chromium se estiver aberto
-pkill -f chromium 2>/dev/null || true
-sleep 1
-
-# Abrir Chromium em modo kiosk (fullscreen, sem barra)
 chromium-browser \\
   --kiosk \\
   --noerrdialogs \\
@@ -52,42 +61,66 @@ chromium-browser \\
   --use-fake-ui-for-media-stream \\
   --enable-features=WebRTC \\
   --allow-file-access-from-files \\
-  "file://$SCRIPT_DIR/index.html" &
+  --disable-gpu \\
+  --num-raster-threads=2 \\
+  "file://${SCRIPT_DIR}/index.html" &
+OBEOF
+
+# [6/6] Configurar .bash_profile para iniciar X automaticamente
+echo "[6/6] A configurar auto-start do X..."
+cat > /home/pi/.bash_profile << 'BPEOF'
+# TRAMA — Auto-start X no login (só no tty1, não no SSH)
+if [ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
+  exec startx /usr/bin/openbox-session -- :0 vt1 2>/dev/null
+fi
+BPEOF
+
+# Criar script de arranque manual (para testes via SSH)
+cat > "$SCRIPT_DIR/start.sh" << STARTEOF
+#!/bin/bash
+# TRAMA — Arranque manual (para testes via SSH)
+SCRIPT_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
+export DISPLAY=:0
+
+pkill -f chromium 2>/dev/null || true
+sleep 1
+
+if ! xdpyinfo -display :0 &>/dev/null; then
+  echo "X não está a correr. A iniciar..."
+  startx /usr/bin/openbox-session -- :0 vt1 &
+  sleep 3
+fi
+
+chromium-browser \\
+  --kiosk --noerrdialogs --disable-infobars \\
+  --disable-session-crashed-bubble --disable-restore-session-state \\
+  --disable-features=TranslateUI --check-for-update-interval=31536000 \\
+  --autoplay-policy=no-user-gesture-required \\
+  --use-fake-ui-for-media-stream --enable-features=WebRTC \\
+  --allow-file-access-from-files --disable-gpu --num-raster-threads=2 \\
+  "file://\${SCRIPT_DIR}/index.html" &
+
+echo "TRAMA iniciado!"
 STARTEOF
 chmod +x "$SCRIPT_DIR/start.sh"
 
-# Criar serviço systemd
-echo "[4/4] A criar serviço systemd..."
-sudo tee /etc/systemd/system/trama.service > /dev/null << SERVICEEOF
-[Unit]
-Description=TRAMA Instalação Interativa
-After=graphical.target
-Wants=graphical.target
-
-[Service]
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/pi/.Xauthority
-WorkingDirectory=$SCRIPT_DIR
-ExecStart=/bin/bash $SCRIPT_DIR/start.sh
-ExecStop=/usr/bin/pkill -f chromium
-Restart=always
-RestartSec=10
-User=pi
-
-[Install]
-WantedBy=graphical.target
-SERVICEEOF
+# Adicionar user pi ao grupo video (webcam)
+sudo usermod -aG video pi
 
 echo ""
 echo "═══════════════════════════════════════════"
 echo "  Instalação completa!"
 echo ""
-echo "  Testar:      ./start.sh"
-echo "  Auto-start:  sudo systemctl enable trama"
-echo "  Parar:       sudo systemctl stop trama"
-echo "  Desativar:   sudo systemctl disable trama"
+echo "  Reiniciar:   sudo reboot"
+echo "  (O TRAMA arranca automaticamente)"
 echo ""
-echo "  NOTA: A webcam precisa de permissão."
+echo "  Testar SSH:  ./start.sh"
+echo "  Parar:       pkill -f chromium"
+echo ""
+echo "  Cadeia: boot → auto-login → X → openbox"
+echo "          → Chromium kiosk → TRAMA"
+echo ""
+echo "  NOTA: A webcam precisa de estar ligada."
 echo "  O --use-fake-ui-for-media-stream"
 echo "  aceita automaticamente o acesso à câmara."
 echo "═══════════════════════════════════════════"
