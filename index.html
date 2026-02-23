@@ -9,7 +9,7 @@
         html, body {
             width: 100vw; height: 100vh;
             overflow: hidden;
-            background: #1a1a1a;
+            background: #000;
             cursor: none;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
         }
@@ -24,13 +24,17 @@
             width: 100%; height: 100%;
             object-fit: cover;
             transform: scaleX(-1);
-            opacity: 0.5;
+            opacity: 0.4;
         }
 
         #mainCanvas {
             position: absolute; top: 0; left: 0;
             width: 100%; height: 100%;
         }
+
+        /* Canvas oculto para motion detection */
+        #motionCanvas { display: none; }
+        #prevCanvas { display: none; }
 
         #status {
             position: absolute; bottom: 20px; left: 20px;
@@ -40,7 +44,7 @@
             transition: opacity 2s;
         }
 
-        /* Menu hamburger (escondido por defeito, aparece ao mover rato) */
+        /* Menu hamburger */
         #menuToggle {
             position: absolute; top: 10px; right: 10px;
             width: 36px; height: 36px;
@@ -96,23 +100,28 @@
         </div>
         <div class="control-group">
             <label>Densidade de Malha</label>
-            <input type="range" id="gridDensity" min="15" max="35" step="2" value="25">
-            <div class="value-display" id="density-value">25</div>
+            <input type="range" id="gridDensity" min="10" max="30" step="2" value="18">
+            <div class="value-display" id="density-value">18</div>
         </div>
         <div class="control-group">
             <label>Raio de Captura</label>
-            <input type="range" id="captureRadius" min="30" max="100" step="5" value="60">
-            <div class="value-display" id="capture-value">60</div>
+            <input type="range" id="captureRadius" min="20" max="120" step="5" value="80">
+            <div class="value-display" id="capture-value">80</div>
+        </div>
+        <div class="control-group">
+            <label>Sensibilidade</label>
+            <input type="range" id="sensitivity" min="10" max="80" step="5" value="30">
+            <div class="value-display" id="sensitivity-value">30</div>
         </div>
         <div class="control-group">
             <label>Opacidade Video</label>
-            <input type="range" id="videoOpacity" min="0" max="100" step="5" value="50">
-            <div class="value-display" id="opacity-value">50%</div>
+            <input type="range" id="videoOpacity" min="0" max="100" step="5" value="40">
+            <div class="value-display" id="opacity-value">40%</div>
         </div>
         <div class="control-group">
-            <label>Opacidade Tracking</label>
-            <input type="range" id="trackingOpacity" min="0" max="100" step="5" value="60">
-            <div class="value-display" id="tracking-opacity-value">60%</div>
+            <label>Força</label>
+            <input type="range" id="forceMultiplier" min="50" max="300" step="10" value="150">
+            <div class="value-display" id="force-value">150</div>
         </div>
     </div>
 
@@ -123,31 +132,36 @@
         <canvas id="mainCanvas"></canvas>
     </div>
 
-    <!-- MediaPipe LOCAL (offline) -->
-    <script src="lib/camera_utils/camera_utils.js"></script>
-    <script src="lib/hands/hands.js"></script>
+    <!-- Canvas ocultos para motion detection -->
+    <canvas id="motionCanvas"></canvas>
+    <canvas id="prevCanvas"></canvas>
 
     <script>
         // ════════════════════════════════════════
-        // CONFIG
+        // CONFIG — Versão LITE (sem MediaPipe)
+        // Usa detecção de movimento por diferença de frames
         // ════════════════════════════════════════
-        const PI_CAMERA_WIDTH = 320;
-        const PI_CAMERA_HEIGHT = 240;
+        const CAM_WIDTH = 160;   // Resolução interna para motion detection
+        const CAM_HEIGHT = 120;
+        const MOTION_GRID = 8;   // Divide a imagem em blocos de 8x8 pixels
 
         let canvas, ctx, webcam;
-        let hands, camera;
+        let motionCanvas, motionCtx;
+        let prevCanvas, prevCtx;
         let isRunning = false;
+        let hasPrevFrame = false;
 
-        let allFingers = [];
-        let allHandLandmarks = [];
+        // Pontos de movimento detectados
+        let motionPoints = [];
 
         const CONFIG = {
             elasticity: 0.08,
-            gridDensity: 20,
-            captureRadius: 60,
+            gridDensity: 18,
+            captureRadius: 80,
             damping: 0.85,
-            videoOpacity: 0.5,
-            trackingOpacity: 0.6
+            videoOpacity: 0.4,
+            sensitivity: 30,       // Limiar de diferença de pixel (0-255)
+            forceMultiplier: 150    // Multiplicador de força do movimento
         };
 
         let points = [];
@@ -183,27 +197,22 @@
                 this.originalX = x; this.originalY = y; this.originalZ = 0;
                 this.vx = 0; this.vy = 0; this.vz = 0;
                 this.col = col; this.row = row;
-                this.attachedToFinger = false;
-                this.attachedFingerX = 0; this.attachedFingerY = 0; this.attachedFingerZ = 0;
+            }
+
+            applyForce(fx, fy, strength) {
+                this.vx += fx * strength;
+                this.vy += fy * strength;
+                this.vz += strength * 50;
             }
 
             update() {
-                if (this.attachedToFinger) {
-                    this.x = this.attachedFingerX;
-                    this.y = this.attachedFingerY;
-                    this.z = this.attachedFingerZ;
-                    this.vx = 0; this.vy = 0; this.vz = 0;
-                } else {
-                    let fx = (this.originalX - this.x) * CONFIG.elasticity;
-                    let fy = (this.originalY - this.y) * CONFIG.elasticity;
-                    let fz = (this.originalZ - this.z) * CONFIG.elasticity * 2;
-                    this.vx += fx; this.vy += fy; this.vz += fz;
-                    this.vx *= CONFIG.damping; this.vy *= CONFIG.damping; this.vz *= CONFIG.damping * 0.9;
-                    this.x += this.vx; this.y += this.vy; this.z += this.vz;
-                }
+                let fx = (this.originalX - this.x) * CONFIG.elasticity;
+                let fy = (this.originalY - this.y) * CONFIG.elasticity;
+                let fz = (this.originalZ - this.z) * CONFIG.elasticity * 2;
+                this.vx += fx; this.vy += fy; this.vz += fz;
+                this.vx *= CONFIG.damping; this.vy *= CONFIG.damping; this.vz *= CONFIG.damping * 0.9;
+                this.x += this.vx; this.y += this.vy; this.z += this.vz;
             }
-
-            reset() { this.attachedToFinger = false; }
         }
 
         // ════════════════════════════════════════
@@ -236,27 +245,99 @@
         }
 
         // ════════════════════════════════════════
+        // MOTION DETECTION (diferença de frames)
+        // ════════════════════════════════════════
+        function detectMotion() {
+            motionPoints = [];
+
+            // Desenhar frame actual no motion canvas
+            motionCtx.drawImage(webcam, 0, 0, CAM_WIDTH, CAM_HEIGHT);
+            const currentFrame = motionCtx.getImageData(0, 0, CAM_WIDTH, CAM_HEIGHT);
+
+            if (!hasPrevFrame) {
+                // Guardar primeiro frame e sair
+                prevCtx.putImageData(currentFrame, 0, 0);
+                hasPrevFrame = true;
+                return;
+            }
+
+            const prevFrame = prevCtx.getImageData(0, 0, CAM_WIDTH, CAM_HEIGHT);
+            const current = currentFrame.data;
+            const prev = prevFrame.data;
+
+            // Analisar por blocos
+            const blockW = MOTION_GRID;
+            const blockH = MOTION_GRID;
+            const blocksX = Math.floor(CAM_WIDTH / blockW);
+            const blocksY = Math.floor(CAM_HEIGHT / blockH);
+
+            for (let bx = 0; bx < blocksX; bx++) {
+                for (let by = 0; by < blocksY; by++) {
+                    let totalDiff = 0;
+                    let diffX = 0, diffY = 0;
+                    let count = 0;
+
+                    // Somar diferenças no bloco
+                    for (let px = bx * blockW; px < (bx + 1) * blockW; px++) {
+                        for (let py = by * blockH; py < (by + 1) * blockH; py++) {
+                            let idx = (py * CAM_WIDTH + px) * 4;
+                            let dr = Math.abs(current[idx] - prev[idx]);
+                            let dg = Math.abs(current[idx+1] - prev[idx+1]);
+                            let db = Math.abs(current[idx+2] - prev[idx+2]);
+                            let diff = (dr + dg + db) / 3;
+
+                            if (diff > CONFIG.sensitivity) {
+                                totalDiff += diff;
+                                count++;
+                            }
+                        }
+                    }
+
+                    if (count > (blockW * blockH) * 0.2) {
+                        // Movimento detectado neste bloco
+                        // Mapear coordenadas do bloco para o canvas (espelhado)
+                        let nx = 1 - ((bx + 0.5) / blocksX); // Espelhar X (webcam mirror)
+                        let ny = (by + 0.5) / blocksY;
+                        let strength = Math.min(1, totalDiff / (count * 80));
+
+                        motionPoints.push({
+                            x: nx * canvas.width,
+                            y: ny * canvas.height,
+                            strength: strength
+                        });
+                    }
+                }
+            }
+
+            // Guardar frame actual como anterior
+            prevCtx.putImageData(currentFrame, 0, 0);
+        }
+
+        // ════════════════════════════════════════
         // RENDER
         // ════════════════════════════════════════
         function render() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            // Reset attachment
-            for (let i = 0; i <= cols; i++)
-                for (let j = 0; j <= rows; j++)
-                    points[i][j].reset();
-
-            // Attach points to fingers
-            for (let finger of allFingers) {
+            // Aplicar forças dos pontos de movimento aos pontos da grelha
+            for (let mp of motionPoints) {
                 for (let i = 0; i <= cols; i++) {
                     for (let j = 0; j <= rows; j++) {
                         let p = points[i][j];
-                        let dist = Math.sqrt((p.x - finger.x) ** 2 + (p.y - finger.y) ** 2);
+                        let dx = p.originalX - mp.x;
+                        let dy = p.originalY - mp.y;
+                        let dist = Math.sqrt(dx * dx + dy * dy);
+
                         if (dist < CONFIG.captureRadius) {
-                            p.attachedToFinger = true;
-                            p.attachedFingerX = finger.x;
-                            p.attachedFingerY = finger.y;
-                            p.attachedFingerZ = finger.z * 500;
+                            let falloff = 1 - (dist / CONFIG.captureRadius);
+                            let force = falloff * mp.strength * (CONFIG.forceMultiplier / 1000);
+                            // Empurrar para fora do centro de movimento
+                            let angle = Math.atan2(dy, dx);
+                            p.applyForce(
+                                Math.cos(angle) * force,
+                                Math.sin(angle) * force,
+                                falloff * mp.strength
+                            );
                         }
                     }
                 }
@@ -268,63 +349,22 @@
                     points[i][j].update();
 
             // Draw
-            drawHandsWireframe();
+            drawMotionGlow();
             drawDistortedPolylines();
         }
 
-        function drawHandsWireframe() {
-            const connections = [
-                [0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
-                [0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],
-                [0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17]
-            ];
-            const opacity = CONFIG.trackingOpacity;
-
-            for (let handIdx = 0; handIdx < allHandLandmarks.length; handIdx++) {
-                let lm = allHandLandmarks[handIdx];
-
-                // Conexoes
-                ctx.strokeStyle = `rgba(0, 255, 0, ${opacity})`;
-                ctx.lineWidth = 3;
+        function drawMotionGlow() {
+            // Visualizar zonas de movimento com glow subtil
+            for (let mp of motionPoints) {
+                let alpha = mp.strength * 0.15;
+                let radius = CONFIG.captureRadius * mp.strength;
+                let gradient = ctx.createRadialGradient(mp.x, mp.y, 0, mp.x, mp.y, radius);
+                gradient.addColorStop(0, `rgba(100, 200, 255, ${alpha})`);
+                gradient.addColorStop(1, 'rgba(100, 200, 255, 0)');
+                ctx.fillStyle = gradient;
                 ctx.beginPath();
-                for (let [a, b] of connections) {
-                    ctx.moveTo(lm[a].x, lm[a].y);
-                    ctx.lineTo(lm[b].x, lm[b].y);
-                }
-                ctx.stroke();
-
-                // Pontas dos dedos (com tamanho baseado em Z)
-                for (let idx of [4, 8, 12, 16, 20]) {
-                    let z = lm[idx].z;
-                    let size = 12 + z * 40;
-                    let alpha = (0.7 + z * 0.3) * opacity;
-
-                    ctx.fillStyle = `rgba(255, 68, 68, ${Math.max(0.3, Math.min(1, alpha))})`;
-                    ctx.beginPath();
-                    ctx.arc(lm[idx].x, lm[idx].y, Math.max(6, size), 0, Math.PI * 2);
-                    ctx.fill();
-
-                    ctx.strokeStyle = `rgba(255, 200, 50, ${Math.max(0.2, Math.min(0.8, alpha * 0.5))})`;
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    ctx.arc(lm[idx].x, lm[idx].y, Math.max(10, size + 5), 0, Math.PI * 2);
-                    ctx.stroke();
-                }
-
-                // Pulso
-                ctx.fillStyle = `rgba(68, 136, 255, ${opacity})`;
-                ctx.beginPath();
-                ctx.arc(lm[0].x, lm[0].y, 10, 0, Math.PI * 2);
+                ctx.arc(mp.x, mp.y, radius, 0, Math.PI * 2);
                 ctx.fill();
-            }
-
-            // Zonas de captura
-            ctx.strokeStyle = `rgba(255, 200, 50, ${opacity * 0.5})`;
-            ctx.lineWidth = 2;
-            for (let finger of allFingers) {
-                ctx.beginPath();
-                ctx.arc(finger.x, finger.y, CONFIG.captureRadius, 0, Math.PI * 2);
-                ctx.stroke();
             }
         }
 
@@ -431,38 +471,26 @@
         }
 
         // ════════════════════════════════════════
-        // CAMERA & HAND TRACKING
+        // CAMERA (getUserMedia directo, sem MediaPipe)
         // ════════════════════════════════════════
         async function startCamera() {
             document.getElementById('status').textContent = 'A iniciar camera...';
 
             try {
-                hands = new Hands({
-                    locateFile: (file) => `lib/hands/${file}`
-                });
-                hands.setOptions({
-                    maxNumHands: 2,
-                    modelComplexity: 0,
-                    minDetectionConfidence: 0.6,
-                    minTrackingConfidence: 0.4
-                });
-                hands.onResults(onHandResults);
-
-                document.getElementById('status').textContent = 'A carregar modelo...';
-
-                camera = new Camera(webcam, {
-                    onFrame: async () => {
-                        if (isRunning) {
-                            await hands.send({ image: webcam });
-                        }
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        width: { ideal: 320 },
+                        height: { ideal: 240 },
+                        facingMode: 'user',
+                        frameRate: { ideal: 15 }
                     },
-                    width: PI_CAMERA_WIDTH,
-                    height: PI_CAMERA_HEIGHT
+                    audio: false
                 });
 
-                await camera.start();
-                isRunning = true;
+                webcam.srcObject = stream;
+                await webcam.play();
 
+                isRunning = true;
                 document.getElementById('status').textContent = 'Camera ativa!';
 
                 // Esconder status apos 4 segundos
@@ -478,43 +506,23 @@
             } catch (error) {
                 console.error('Erro camera:', error);
                 document.getElementById('status').textContent = 'Erro: ' + error.message + ' — a tentar novamente...';
-                // Retry automatico apos 3 segundos
                 setTimeout(startCamera, 3000);
             }
         }
 
-        function onHandResults(results) {
-            allFingers = [];
-            allHandLandmarks = [];
-
-            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-                for (let handIdx = 0; handIdx < results.multiHandLandmarks.length; handIdx++) {
-                    const lm = results.multiHandLandmarks[handIdx];
-                    const landmarks = lm.map(p => ({
-                        x: (1 - p.x) * canvas.width,
-                        y: p.y * canvas.height,
-                        z: (p.z || 0) * -1
-                    }));
-                    allHandLandmarks.push(landmarks);
-
-                    for (let tipIdx of [4, 8, 12, 16, 20]) {
-                        allFingers.push({
-                            x: landmarks[tipIdx].x,
-                            y: landmarks[tipIdx].y,
-                            z: landmarks[tipIdx].z,
-                            handIndex: handIdx,
-                            fingerIndex: tipIdx
-                        });
-                    }
-                }
-            }
-        }
-
         // ════════════════════════════════════════
-        // ANIMATION
+        // ANIMATION LOOP
         // ════════════════════════════════════════
+        let frameCount = 0;
         function animate() {
             if (!isRunning) return;
+
+            // Detectar movimento a cada 2 frames (poupar CPU)
+            frameCount++;
+            if (frameCount % 2 === 0) {
+                detectMotion();
+            }
+
             render();
             requestAnimationFrame(animate);
         }
@@ -527,13 +535,15 @@
             CONFIG.gridDensity = parseInt(document.getElementById('gridDensity').value);
             CONFIG.captureRadius = parseInt(document.getElementById('captureRadius').value);
             CONFIG.videoOpacity = parseInt(document.getElementById('videoOpacity').value) / 100;
-            CONFIG.trackingOpacity = parseInt(document.getElementById('trackingOpacity').value) / 100;
+            CONFIG.sensitivity = parseInt(document.getElementById('sensitivity').value);
+            CONFIG.forceMultiplier = parseInt(document.getElementById('forceMultiplier').value);
 
             document.getElementById('elasticity-value').textContent = CONFIG.elasticity.toFixed(2);
             document.getElementById('density-value').textContent = CONFIG.gridDensity;
             document.getElementById('capture-value').textContent = CONFIG.captureRadius;
             document.getElementById('opacity-value').textContent = document.getElementById('videoOpacity').value + '%';
-            document.getElementById('tracking-opacity-value').textContent = document.getElementById('trackingOpacity').value + '%';
+            document.getElementById('sensitivity-value').textContent = CONFIG.sensitivity;
+            document.getElementById('force-value').textContent = CONFIG.forceMultiplier;
 
             webcam.style.opacity = CONFIG.videoOpacity;
         }
@@ -554,6 +564,17 @@
             canvas = document.getElementById('mainCanvas');
             ctx = canvas.getContext('2d');
             webcam = document.getElementById('webcam');
+
+            // Canvas para motion detection
+            motionCanvas = document.getElementById('motionCanvas');
+            motionCanvas.width = CAM_WIDTH;
+            motionCanvas.height = CAM_HEIGHT;
+            motionCtx = motionCanvas.getContext('2d', { willReadFrequently: true });
+
+            prevCanvas = document.getElementById('prevCanvas');
+            prevCanvas.width = CAM_WIDTH;
+            prevCanvas.height = CAM_HEIGHT;
+            prevCtx = prevCanvas.getContext('2d', { willReadFrequently: true });
 
             resizeCanvas();
 
@@ -589,22 +610,14 @@
             document.getElementById('gridDensity').addEventListener('input', () => { updateSliders(); createGrid(); });
             document.getElementById('captureRadius').addEventListener('input', updateSliders);
             document.getElementById('videoOpacity').addEventListener('input', updateSliders);
-            document.getElementById('trackingOpacity').addEventListener('input', updateSliders);
+            document.getElementById('sensitivity').addEventListener('input', updateSliders);
+            document.getElementById('forceMultiplier').addEventListener('input', updateSliders);
 
             // Responsive
             window.addEventListener('resize', resizeCanvas);
 
-            // AUTO-START: camera arranca assim que MediaPipe carrega
-            function waitAndStart() {
-                if (typeof Hands !== 'undefined' && typeof Camera !== 'undefined') {
-                    startCamera();
-                } else {
-                    document.getElementById('status').textContent = 'A carregar MediaPipe...';
-                    setTimeout(waitAndStart, 300);
-                }
-            }
-            // Iniciar imediatamente
-            waitAndStart();
+            // AUTO-START: camera arranca imediatamente
+            startCamera();
         }
 
         init();
