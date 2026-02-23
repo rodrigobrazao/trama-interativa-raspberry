@@ -131,8 +131,8 @@
         // ════════════════════════════════════════
         // CONFIG
         // ════════════════════════════════════════
-        const PI_CAMERA_WIDTH = 640;
-        const PI_CAMERA_HEIGHT = 480;
+        const PI_CAMERA_WIDTH = 320;
+        const PI_CAMERA_HEIGHT = 240;
 
         let canvas, ctx, webcam;
         let hands, camera;
@@ -143,7 +143,7 @@
 
         const CONFIG = {
             elasticity: 0.08,
-            gridDensity: 25,
+            gridDensity: 20,
             captureRadius: 60,
             damping: 0.85,
             videoOpacity: 0.5,
@@ -442,9 +442,9 @@
                 });
                 hands.setOptions({
                     maxNumHands: 2,
-                    modelComplexity: 1,
-                    minDetectionConfidence: 0.7,
-                    minTrackingConfidence: 0.5
+                    modelComplexity: 0,
+                    minDetectionConfidence: 0.6,
+                    minTrackingConfidence: 0.4
                 });
                 hands.onResults(onHandResults);
 
